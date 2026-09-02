@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Validate and lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # The cfengine CLI (https://pypi.org/project/cfengine/) provides
+      # `cfengine lint` and `cfengine format`, and depends on cfbs.
+      - name: Install the cfengine CLI
+        run: pip install cfengine
+      - name: Validate cfbs.json
+        run: cfbs validate
+      # Strict mode is off because the linter does not know the standard
+      # library bodies of the masterfiles module (default:mog, default:results).
+      - name: Lint cfbs.json and policy
+        run: cfengine lint --strict no ./cfbs.json ./policy/
+      - name: Check formatting
+        run: cfengine format --check ./cfbs.json ./policy/
+
+  test:
+    name: Functional test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # The cfengine CLI depends on cfbs and cf-remote, which the test needs.
+      - name: Install the cfengine CLI
+        run: pip install cfengine
+      - name: Install CFEngine community on the runner
+        run: cf-remote install --clients localhost --edition community
+      - name: Build test policy sets
+        run: bash tests/build-policies.sh
+        env:
+          SWAP_PATH: /manage-swap-test/swapfile
+      - name: Run functional test
+        run: sudo --preserve-env=SWAP_PATH bash tests/functional.sh
+        env:
+          SWAP_PATH: /manage-swap-test/swapfile

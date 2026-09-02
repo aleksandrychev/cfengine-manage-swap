@@ -1,0 +1,10 @@
+# Build outputs / local test projects
+out/
+tests/out/
+
+# Editors and OS
+.vscode/
+.DS_Store
+
+# Python
+__pycache__/

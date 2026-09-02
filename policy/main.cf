@@ -1,0 +1,228 @@
+body file control
+{
+  namespace => "manage_swap";
+}
+
+bundle agent main
+# @brief Ensure a swap file of the desired size exists, is active and is
+#   persisted in /etc/fstab, then report active swap as inventory.
+#
+# Inputs (set via `cfbs input manage-swap`, augments, CMDB or host-specific data):
+#   - manage_swap:main.swap_size_gb    Size of the swap file in GB (default "2")
+#   - manage_swap:main.swap_file_path  Absolute path of the swap file (default "/swapfile")
+#
+# Linux only. Nothing is done on other platforms.
+{
+  vars:
+    "swap_size_gb"
+      string => "2",
+      if => not(isvariable("swap_size_gb")),
+      comment => "Default swap file size in GB; override via module input, augments or CMDB";
+
+    "swap_file_path"
+      string => "/swapfile",
+      if => not(isvariable("swap_file_path")),
+      comment => "Default swap file path; override via module input, augments or CMDB";
+
+  classes:
+    "_valid_size"
+      expression => and(
+        regcmp("[0-9]*\.?[0-9]+", "$(swap_size_gb)"),
+        isgreaterthan("$(swap_size_gb)", "0")
+      ),
+      comment => "The swap size must be a positive number of GB";
+
+    "_valid_path"
+      expression => regcmp("/.+", "$(swap_file_path)"),
+      comment => "The swap file path must be absolute";
+
+  methods:
+    linux._valid_size._valid_path::
+      "swap_file"
+        usebundle => swap_file("$(swap_file_path)", "$(swap_size_gb)"),
+        comment => "Ensure the swap file exists, is formatted, is active and is in /etc/fstab";
+
+    linux::
+      "swap_inventory"
+        usebundle => swap_inventory,
+        comment => "Report active swap files and total swap size as inventory";
+
+  reports:
+    linux.!_valid_size::
+      "manage-swap: Invalid swap size '$(swap_size_gb)', expected a positive number of GB (e.g. '2' or '0.5'). Swap file not managed.";
+
+    linux.!_valid_path::
+      "manage-swap: Invalid swap file path '$(swap_file_path)', expected an absolute path. Swap file not managed.";
+}
+
+bundle agent swap_file(path, size_gb)
+# @brief Ensure the swap file `path` is `size_gb` GB, has a swap signature,
+#   is active and has an entry in /etc/fstab.
+#
+# The file is written with dd (mkswap(8) recommends dd over fallocate, since
+# swap files must not have holes or unwritten extents). If the file exists
+# with a different size it is deactivated (swapoff), rewritten, formatted and
+# activated again. The fstab entry is only added once the swap file has been
+# activated successfully, and an existing fstab entry for the same path is
+# left untouched.
+#
+# @param path Absolute path of the swap file
+# @param size_gb Size of the swap file in GB (integer or decimal)
+{
+  vars:
+    "_count_mb"
+      int => int(eval("$(size_gb) * 1024", "math", "infix")),
+      comment => "Number of 1 MiB blocks to write with dd";
+
+    "_size_bytes"
+      int => int(eval("$(_count_mb) * 1048576", "math", "infix")),
+      comment => "Expected size of the swap file in bytes";
+
+    "_path_regex"
+      string => escape("$(path)"),
+      comment => "Swap file path with regular expression characters escaped";
+
+    "_dd"
+      string => ifelse(isexecutable("/usr/bin/dd"), "/usr/bin/dd", "/bin/dd");
+
+    "_mkswap"
+      string => ifelse(
+        isexecutable("/usr/sbin/mkswap"), "/usr/sbin/mkswap", "/sbin/mkswap"
+      );
+
+    "_swapon"
+      string => ifelse(
+        isexecutable("/usr/sbin/swapon"), "/usr/sbin/swapon", "/sbin/swapon"
+      );
+
+    "_swapoff"
+      string => ifelse(
+        isexecutable("/usr/sbin/swapoff"), "/usr/sbin/swapoff", "/sbin/swapoff"
+      );
+
+  classes:
+    "_size_ok"
+      expression => strcmp("$(_size_bytes)", filestat("$(path)", "size")),
+      comment => "The swap file exists and already has the desired size";
+
+    "_active"
+      expression => regline("\s*$(_path_regex)\s+file\s+.*", "/proc/swaps"),
+      comment => "The swap file is currently listed in /proc/swaps";
+
+  files:
+    "$(path)"
+      create => "true",
+      perms => default:mog("0600", "root", "root"),
+      comment => "The swap file must exist and only be accessible by root";
+
+    "/etc/fstab"
+      edit_line => fstab_swap_entry("$(path)"),
+      edit_defaults => default:std_defs,
+      if => or("_active", "_swapon_repaired"),
+      classes => default:results("bundle", "_fstab"),
+      comment => "Persist the swap file across reboots once it has been activated successfully";
+
+  commands:
+    "$(_swapoff)"
+      arglist => { "$(path)" },
+      if => and("_active", not("_size_ok")),
+      classes => default:results("bundle", "_swapoff"),
+      comment => "Deactivate the swap file before resizing it";
+
+    "$(_dd)"
+      arglist => {
+        "if=/dev/zero", "of=$(path)", "bs=1M", "count=$(_count_mb)"
+      },
+      contain => default:silent,
+      if => and(not("_size_ok"), or(not("_active"), "_swapoff_repaired")),
+      classes => default:results("bundle", "_dd"),
+      comment => "Write the swap file with zeros so it has the desired size and no holes";
+
+    "$(_mkswap)"
+      arglist => { "$(path)" },
+      contain => default:silent,
+      if => and(
+        or(not("_active"), "_swapoff_repaired"), or("_size_ok", "_dd_repaired")
+      ),
+      classes => default:results("bundle", "_mkswap"),
+      comment => "Set up a swap signature on the inactive swap file";
+
+    "$(_swapon)"
+      arglist => { "$(path)" },
+      if => and(or(not("_active"), "_swapoff_repaired"), "_mkswap_repaired"),
+      classes => default:results("bundle", "_swapon"),
+      comment => "Activate the swap file";
+
+  reports:
+    inform_mode|verbose_mode::
+      "manage-swap: swap file '$(path)' resized to $(size_gb) GB"
+        if => and("_swapoff_repaired", "_swapon_repaired");
+
+      "manage-swap: swap file '$(path)' ($(size_gb) GB) created and activated"
+        if => and("_dd_repaired", "_swapon_repaired", not("_swapoff_repaired"));
+
+      "manage-swap: swap file '$(path)' activated"
+        if => and("_swapon_repaired", not("_dd_repaired"));
+
+      "manage-swap: added '$(path)' to /etc/fstab" if => "_fstab_repaired";
+}
+
+bundle edit_line fstab_swap_entry(path)
+# @brief Ensure /etc/fstab has an entry for the swap file `path`.
+#
+# A new entry is only inserted when no (uncommented) entry for the path exists,
+# so a custom entry (for example with a priority option) is left untouched.
+#
+# @param path Absolute path of the swap file
+{
+  vars:
+    "_path_regex" string => escape("$(path)");
+
+  insert_lines:
+    "$(path) none swap sw 0 0"
+      if => not(regline("\s*$(_path_regex)\s+.*", "$(edit.filename)")),
+      comment => "Add an fstab entry for the swap file unless one already exists";
+}
+
+bundle agent swap_inventory
+# @brief Report active swap as inventory, read from /proc/swaps.
+#
+# @inventory Swap files - Active swap files (entries of type "file" in /proc/swaps)
+# @inventory Swap total (MB) - Total size of all active swap (files and partitions)
+{
+  vars:
+    "_swaps"
+      data => data_readstringarrayidx("/proc/swaps", "", "\s+", 100, 100000),
+      if => fileexists("/proc/swaps"),
+      comment => "Rows of /proc/swaps, including the header row: filename, type, size (KB), used (KB), priority";
+
+    "_idx" slist => getindices("_swaps");
+
+    "_swap_file[$(_idx)]"
+      string => "$(_swaps[$(_idx)][0])",
+      if => strcmp("file", "$(_swaps[$(_idx)][1])");
+
+    "_swap_size_kb[$(_idx)]"
+      string => "$(_swaps[$(_idx)][2])",
+      if => regcmp("[0-9]+", "$(_swaps[$(_idx)][2])"),
+      comment => "Skips the header row of /proc/swaps";
+
+    "_total_kb" real => sum(getvalues("_swap_size_kb"));
+
+    "swap_files"
+      slist => getvalues("_swap_file"),
+      meta => { "inventory", "attribute_name=Swap files" },
+      comment => "Active swap files according to /proc/swaps";
+
+    "swap_total_mb"
+      int => int(eval("$(_total_kb) / 1024", "math", "infix")),
+      meta => { "inventory", "attribute_name=Swap total (MB)" },
+      comment => "Total size of active swap files and partitions in MB";
+
+  reports:
+    inform_mode|verbose_mode::
+      "manage-swap: active swap files: $(with)"
+        with => join(", ", "swap_files");
+
+      "manage-swap: total active swap: $(swap_total_mb) MB";
+}

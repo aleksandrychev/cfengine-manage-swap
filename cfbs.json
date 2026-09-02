@@ -1,0 +1,39 @@
+{
+  "name": "manage-swap",
+  "description": "CFEngine Build module which manages a swap file: creates it, enables it, adds it to /etc/fstab and reports swap files as inventory.",
+  "type": "module",
+  "provides": {
+    "manage-swap": {
+      "description": "Ensure a swap file of the configured size (default 2 GB) exists, is active and is persisted in /etc/fstab. Reports active swap files and total swap size as inventory.",
+      "tags": ["management", "inventory"],
+      "by": "https://github.com/aleksandrychev",
+      "version": "0.1.0",
+      "steps": [
+        "copy policy/main.cf services/cfbs/modules/manage-swap/main.cf",
+        "policy_files services/cfbs/modules/manage-swap/main.cf",
+        "bundles manage_swap:main",
+        "input ./input.json def.json"
+      ],
+      "input": [
+        {
+          "type": "string",
+          "variable": "swap_size_gb",
+          "namespace": "manage_swap",
+          "bundle": "main",
+          "label": "Swap size (GB)",
+          "question": "Size of the swap file in GB (e.g. '2' or '0.5')",
+          "default": "2"
+        },
+        {
+          "type": "string",
+          "variable": "swap_file_path",
+          "namespace": "manage_swap",
+          "bundle": "main",
+          "label": "Swap file path",
+          "question": "Absolute path of the swap file",
+          "default": "/swapfile"
+        }
+      ]
+    }
+  }
+}
