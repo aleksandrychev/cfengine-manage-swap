@@ -1,5 +1,7 @@
 # manage-swap
 
+[![CI](https://github.com/aleksandrychev/cfengine-manage-swap/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/aleksandrychev/cfengine-manage-swap/actions/workflows/ci.yml)
+
 CFEngine Build module which manages a swap file on Linux hosts.
 It makes sure a swap file of the configured size exists, is active, survives reboots via `/etc/fstab`, and it reports the active swap files as inventory in Mission Portal.
 
